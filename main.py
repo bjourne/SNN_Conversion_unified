@@ -5,19 +5,7 @@ import pickle
 import torch
 import math
 
-from distutils.util import strtobool  # for argparse
-
-# import warnings
-# import shutil  # To save checkpoint (the best model)
-# from torch.utils.data import Subset
-
-# import torch.nn as nn
-# import torch.multiprocessing as mp
-# import torchvision.datasets as datasets
-# import torch.distributed as dist
-# import random
-# import numpy as np
-# from ImageNet.train import main_worker
+from distutils.util import strtobool
 
 from Models import modelpool
 from Preprocess import datapool
@@ -32,14 +20,26 @@ from logger import Logger
 parser = argparse.ArgumentParser(description='PyTorch ANN-SNN Conversion')
 
 # ## ANN or SNN
-parser.add_argument('--action', default='train', type=str, help='Action: train, or test/evaluate.',
-                    choices=['train', 'test', 'evaluate'])
-parser.add_argument('--mode', default='ann', type=str, help='ANN training/testing, or SNN testing',
-                    choices=['ann', 'snn'])
+parser.add_argument(
+    '--action',
+    default='train',
+    type=str,
+    help='Action: train, or test/evaluate.',
+    choices=['train', 'test', 'evaluate']
+)
+parser.add_argument(
+    '--mode',
+    default='ann',
+    type=str, help='ANN training/testing, or SNN testing',
+    choices=['ann', 'snn']
+)
 
-# ## Dataloader and Training the ANN model
-parser.add_argument('--device', default='cuda', type=str, help='Using cuda or cpu')
-parser.add_argument('--gpus', default=1, type=int, help='GPU number to use.')
+parser.add_argument(
+    '--device', default='cuda', type=str, help='Using cuda or cpu'
+)
+parser.add_argument(
+    '--gpus', default=1, type=int, help='GPU number to use.'
+)
 parser.add_argument('--num_workers', default=4, type=int, help='num of workers to use.')
 parser.add_argument('--batch_size', '-bs', default=128, type=int, help='Batchsize')
 parser.add_argument('--lr', '-learning_rate', default=0.1, type=float, metavar='LR', help='Initial learning rate')
@@ -88,20 +88,11 @@ parser.add_argument('--result', default='AccRes', type=str, help='Results saved 
 
 
 args = parser.parse_args()
-# args = parser.parse_args(args=[])  # When using jupyter
 
 state = {k: v for k, v in args._get_kwargs()}
 
-
-# # ## Use CUDA, using cscc clusters
-# use_cuda = torch.cuda.is_available()
-# device = 'cuda' if use_cuda else 'cpu'
-# args.device = device
-# args.gpus = 1 if use_cuda else 0
-
-
 # ### Use CUDA on normal GPUs or CPU
-use_cuda = torch.cuda.is_available()
+use_cuda = False # torch.cuda.is_available()
 args.gpus = args.gpus if use_cuda else 0
 device = f'cuda:{args.gpus}' if use_cuda else 'cpu'
 args.device = device
@@ -151,13 +142,11 @@ is_best = 0
 
 
 def main_verbose(args):
-    """ This has the for-loop and the optimizer in the main function
-    main_verbose() is supposed to be the same as main() """
     global best_acc1
     global is_best
     # ## Set the seed
     seed_all(args.seed)
-    start_epoch = args.start_epoch  # start from epoch 0 or last checkpoint epoch
+    start_epoch = args.start_epoch
     # ## Make path a dir to save models
     if not os.path.isdir(args.checkpoint + '/' + args.dataset):
         mkdir_p(args.checkpoint + '/' + args.dataset)
@@ -191,10 +180,6 @@ def main_verbose(args):
             lr=args.lr,
             momentum=args.momentum
             )
-        # ## # If use all parameter, worse performance. 
-        # optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(args.epochs/4) )
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(args.epochs/4), eta_min=args.lr*0.88)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs )
     elif args.optimizer == 'Adam':
         optimizer = torch.optim.Adam(
@@ -210,7 +195,7 @@ def main_verbose(args):
             {'params': para3, 'weight_decay': args.weight_decay}
             ],
         lr=args.lr)
-    # optimizer1 = torch.optim.SGD(model.parameters(), lr=args.lr)  # If use all parameter, worse performance. 
+    # optimizer1 = torch.optim.SGD(model.parameters(), lr=args.lr)  # If use all parameter, worse performance.
     scheduler1 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer1, T_max=args.epochs )
     title = f'{args.dataset}_{args.name}_train_ANN'
     # ## Resume, optionally resume from a checkpoint
@@ -234,7 +219,7 @@ def main_verbose(args):
                 ['Epoch', 'Learning Rate', 'Train Loss', 'Train Acc1.', 'Train Acc5.', 'Test Loss', 'Test Acc1.', 'Test Acc5.'])
             logger.set_formats(
                 ['{0:d}', '{0:.7f}', '{0:.4f}', '{0:.3f}', '{0:.3f}', '{0:.4f}', '{0:.3f}', '{0:.3f}'])
-    
+
     # ## Train the model
     if args.action == 'train':
         print(f'Training model ==> {args.dataset} {args.name}')
@@ -420,8 +405,6 @@ is_best = 0
 
 
 def main(args):
-    """ This has the for-loop and the optimizer rapped in the train_ann() function
-    main_verbose() is supposed to be the same as main() """
     global best_acc1
     global is_best
     # ## Set the seed
@@ -540,9 +523,7 @@ def main(args):
 if __name__ == "__main__":
     import time
     end = time.time()
-    # ## We use this to run experiments.
-    # main_verbose(args)  # To test work well or not. 
-    main(args)  # To test work well or not.
+    main(args)
     time.sleep(2)
     used_time = time.time() - end
     print(f'Used Time (in minutes): {used_time/60: .4f} mins')
@@ -550,4 +531,3 @@ if __name__ == "__main__":
     print(f'--checkpoint: {args.checkpoint}')
     print(f'--name: {args.name}')
     print("DONE!")
-    # print(666)

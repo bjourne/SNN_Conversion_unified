@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 
-# code from https://github.com/uoguelph-mlrg/Cutout/blob/master/util/cutout.py 
+# code from https://github.com/uoguelph-mlrg/Cutout/blob/master/util/cutout.py
 # Improved Regularization of Convolutional Neural Networks with Cutout.
 class Cutout(object):
     """Randomly mask out one or more patches from an image.
@@ -64,7 +64,7 @@ class SubPolicy(object):
             "translateY": np.linspace(0, 150 / 331, 10),
             "rotate": np.linspace(0, 30, 10),
             "color": np.linspace(0.0, 0.9, 10),
-            "posterize": np.round(np.linspace(8, 4, 10), 0).astype(np.int),
+            "posterize": np.round(np.linspace(8, 4, 10), 0).astype(int),
             "solarize": np.linspace(256, 0, 10),
             "contrast": np.linspace(0.0, 0.9, 10),
             "sharpness": np.linspace(0.0, 0.9, 10),
@@ -76,7 +76,7 @@ class SubPolicy(object):
         def rotate_with_fill(img, magnitude):
             rot = img.convert("RGBA").rotate(magnitude)
             return Image.composite(rot, Image.new("RGBA", rot.size, (128,) * 4), rot).convert(img.mode)
-        
+
         func = {
             "shearX": lambda img, magnitude: img.transform(
                 img.size, Image.AFFINE, (1, magnitude *
@@ -223,12 +223,10 @@ class CIFAR10Policy(object):
             SubPolicy(0.8, "equalize", 8, 0.1, "invert", 3, fillcolor),
             SubPolicy(0.7, "translateY", 9, 0.9, "autocontrast", 1, fillcolor)
         ]
-    
+
     def __call__(self, img):
         policy_idx = random.randint(0, len(self.policies) - 1)
         return self.policies[policy_idx](img)
-    
+
     def __repr__(self):
         return "AutoAugment CIFAR10 Policy"
-
-

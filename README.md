@@ -4,7 +4,7 @@ Please first change the variable `DIR` at File `.Preprocess\getdataloader.py` (l
 
 Train model with SlipReLU-Layer
 ```
-python main.py --action='train' --model={vgg16, resnet18, resnet20, resnet34} --dataset={cifar10, cifar100} --a={0.1, 0.2, ..., 0.9} --l=QUASI_LATENCY
+	python main.py --action='train' --model={vgg16, resnet18, resnet20, resnet34} --dataset={cifar10, cifar100} --a={0.1, 0.2, ..., 0.9} --l=QUASI_LATENCY
 
 ```
 Test accuracy in ANN mode or SNN mode
