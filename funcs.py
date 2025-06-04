@@ -60,56 +60,56 @@ def eval_snn(test_dataloader, model, device, sim_len=8):
     return tot/length
 
 
-def train(train_loader, net, crit, optimizer, epoch, args):
+def train(loader, net, crit, optimizer, epoch, args):
     batch_time = AverageMeter(name='Time', fmt=':6.3f')
     losses = AverageMeter(name='Loss', fmt=':6.3f')  # fmt=':.4e' with 1.1337e+00
     top1 = AverageMeter(name='Acc@1', fmt=':6.2f')
     top5 = AverageMeter(name='Acc@5', fmt=':6.2f')
     progress = ProgressMeter(
-        len(train_loader),
+        len(loader),
         [batch_time, losses, top1, top5],
         prefix="Epoch: [{}]".format(epoch))
     # ## Use to calculate the loss
     running_loss = 0
     n_correct = 0
-    num_total = 0
+    n_total = 0
 
     net.train()
     end = time.time()
-    for i, (images, target) in enumerate(train_loader):
+    for i, (images, yreal) in enumerate(loader):
+        n_batch = images.size(0)
         images = images.to(DEVICE, non_blocking=True)
-        target = target.to(DEVICE, non_blocking=True)
+        yreal = yreal.to(DEVICE, non_blocking=True)
 
-        output = net(images)
+        yhat = net(images)
 
-        loss = crit(output, target)
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), images.size(0))   # losses.show()
-        top1.update(acc1.item(), images.size(0))
-        top5.update(acc5.item(), images.size(0))
 
-        """ Calculate loss and accuracy manually """
-        # ## calculate the loss and accuracy
+        loss = crit(yhat, yreal)
+        acc1, acc5 = accuracy(yhat, yreal, topk=(1, 5))
+        losses.update(loss.item(), n_batch)
+        top1.update(acc1.item(), n_batch)
+        top5.update(acc5.item(), n_batch)
+
         running_loss += loss.item()
-        _, predicted = output.max(dim=1)
+        _, predicted = yhat.max(dim=1)
 
-        batch_correct = predicted.eq(target).sum().item()
+        batch_correct = predicted.eq(yreal).sum().item()
         n_correct += batch_correct
-        num_total += target.size(0)
+        n_total += n_batch
         if torch.isnan(torch.tensor(loss.item())):
             break
-        # ## Compute gradient and do SGD step
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        # ## Measure elapsed time
+
         batch_time.update(time.time() - end)
         end = time.time()
-        if (i % args.print_freq == 0) or (i == len(train_loader)-1):
+        if (i % args.print_freq == 0) or (i == len(loader)-1):
             progress.display(i + 1)
 
     avg_loss = running_loss / (i+1)
-    accu = n_correct / num_total
+    accu = n_correct / n_total
     # ## Print train/test loss/accuracy
     print(f"Train AvgLoss: {avg_loss:>.3f}, Accuracy: {(100*accu):>0.2f}% .")
     print(f"Train loss.avg: {losses.sum /losses.count:>0.3f}, "
@@ -132,39 +132,38 @@ def test(test_loader, model, crit, args):
     # ## Use to calculate the loss
     running_loss = 0
     n_correct = 0
-    num_total = 0  # len(trainloader.dataset) # which is num_total
+    n_total = 0  # len(trainloader.dataset) # which is num_total
     # ## Switch to evaluate mode
     model.eval()
     with torch.no_grad():
         end = time.time()
-        for i, (images, target) in enumerate(test_loader):
+        for i, (images, yreal) in enumerate(test_loader):
             # ## Move data to the same device as model
-            images = images.to(args.device, non_blocking=True)
-            target = target.to(args.device, non_blocking=True)
+            images = images.to(DEVICE, non_blocking=True)
+            yreal = yreal.to(DEVICE, non_blocking=True)
             # ## Compute output
             output = model(images)
             # ## Measure accuracy and record loss
-            loss = crit(output, target)
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            loss = crit(output, yreal)
+            acc1, acc5 = accuracy(output, yreal, topk=(1, 5))
             losses.update(loss.item(), images.size(0))
             top1.update(acc1.item(), images.size(0))
             top5.update(acc5.item(), images.size(0))
 
             running_loss += loss.item()
             _, predicted = output.max(dim=1)
-            # batch_correct = np.sum((targets == predicted).detach().cpu().numpy())
-            batch_correct = predicted.eq(target).sum().item()
+
+            batch_correct = predicted.eq(yreal).sum().item()
             n_correct += batch_correct
-            num_total += target.size(0)
+            n_total += yreal.size(0)
             # ## Measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
             if (i % args.print_freq == 0) or (i == len(test_loader)-1):
                 progress.display(i + 1)
-    # ## Calculate the mean loss and correct ratio
-    # avg_loss = running_loss / len(test_loader)
+
     avg_loss = running_loss / (i+1)
-    accu = n_correct / num_total
+    accu = n_correct / n_total
     # ## Print train/test loss/accuracy
     print(f"Test AvgLoss: {avg_loss:>.3f}, Accuracy: {(100*accu):>0.2f}% .")
     print(f"Test loss.avg: {losses.sum /losses.count:>0.3f}, "
@@ -229,7 +228,7 @@ def train_ann_flag(
 
 
 def train_ann_(train_loader, test_loader, model, crit, args, state):
-    model.to(args.device)
+    model.to(DEVICE)
     # ## SGD with momentum
     # ## If use all parameter, worse performance.
     optimizer = SGD(model.parameters(), lr=args.lr, momentum=args.momentum)

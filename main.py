@@ -12,11 +12,14 @@ from Models import modelpool
 from Preprocess import datapool
 
 from funcs import seed_all, eval_ann, eval_snn, train, test, train_ann
+from modules import TCL
 from utils import regular_set
-from utils import replace_activation_by_slip, replace_activation_by_neuron, replace_maxpool2d_by_avgpool2d
+from utils import (isActivation, replace_activation_by_neuron, replace_maxpool2d_by_avgpool2d)
 from misc import mkdir_p, save_checkpoint
 from logger import Logger
-from torch.nn import CrossEntropyLoss
+
+from torch.autograd import Function
+from torch.nn import CrossEntropyLoss, Module, Parameter
 
 DEVICE = "cpu"
 
@@ -115,7 +118,93 @@ print(f'--checkpoint: {args.checkpoint}')
 
 args.name = f'{args.dataset}_{args.model}_L_{args.l}_a_{args.a}_seed_{args.seed}'
 
-# ## opt method 2
+class GradFloor(Function):
+    @staticmethod
+    def forward(ctx, input):
+        return input.floor()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output
+
+class MySlipReLU_(Module):
+    def __init__(self, up=3., N=4, a=0., shift1=0., shift2=0., a_learnable=False):
+        super().__init__()
+        self.slip_relu = SlipReLU_.apply
+        self.up = Parameter(torch.tensor(up), requires_grad=True)
+        self.N = torch.tensor(N)
+        self.shift1 = torch.tensor(shift1)
+        self.shift2 = torch.tensor(shift2)
+        self.a_learnable = a_learnable
+        if self.a_learnable:
+            self.learn = torch.tensor(0.1)
+            self.a = Parameter(torch.tensor(a), requires_grad=True)
+        else:
+            self.a = torch.tensor(a)
+            self.learn = None
+
+    def forward(self, x):
+        x = self.slip_relu(x, self.up, self.N, self.a, self.shift1, self.shift2, self.learn)
+        return x
+
+class MySlipReLU(Module):
+    def __init__(self, up=8., N=32, a=0., shift1=0., shift2=0., a_learnable=False):
+        """
+        Parameters
+        ----------
+        up : TYPE, optional
+            DESCRIPTION. The default is 8..
+        N : TYPE, optional
+            DESCRIPTION. The default is 32.
+        a : TYPE, optional
+            DESCRIPTION. The default is 0..
+        shift1 : TYPE, optional
+            DESCRIPTION. The default is 0..
+        shift2 : TYPE, optional
+            DESCRIPTION. The default is 0..
+        a_learnable : TYPE, optional
+            DESCRIPTION. The default is False.
+
+        Returns
+        -------
+        None.
+
+        For ytemp, if we use the torch.floor(), then it will not give the correct x.grad, up.grad
+
+        """
+        super().__init__()
+        self.myfloor = GradFloor.apply
+        self.up = Parameter(torch.tensor(up), requires_grad=True)
+        self.N = N
+        self.shift1 = shift1
+        self.shift2 = shift2
+        self.a_learnable = a_learnable
+        if self.a_learnable:
+            self.a = Parameter(torch.tensor(a), requires_grad=True)
+        else:
+            self.a = a
+
+    def __common_forward(self, x):
+        # ## Version 2
+        x = x / self.up
+        temp0 = torch.clamp(x + self.shift1/self.N , 0., 1.)
+        # ### If use the torch.floor() wrong x.grad, wrong up.grad (NEVER use torch.floor() here )
+        # ### ytemp = self.up * torch.clamp( 1/ self.N * torch.floor(self.N *x / self.up + self.shift2) , 0., 1.)  # [-shift2* up/N, up -shift2*up/N]
+        ztemp = self.up * temp0
+        temp1 = self.myfloor(self.N * x + self.shift2) / self.N  # [-shift2* up/N, up +shift1*up/N]
+        temp2 = torch.clamp(temp1, 0., 1.)
+        ytemp = self.up *temp2
+        w = self.a * ztemp + (1-self.a) * ytemp
+        return w
+
+    def forward(self, x):
+        assert 0 <= self.a <= 1.0
+        if self.a_learnable:
+            ### If defined as following,there is grad of a.
+            self.a = Parameter(torch.tensor(0.0), requires_grad=True) if self.a < 0.0 else self.a
+            self.a = Parameter(torch.tensor(1.0), requires_grad=True) if self.a > 1.0 else self.a
+        return self.__common_forward(x)
+
 def adjust_learning_rate(optimizer, epoch, T_max):
     """
     lr = 0.1; epochs = 120; T_max = int(epochs/4)
@@ -139,273 +228,28 @@ def lr_scheduler(optimizer, epoch):
             param_group['lr'] = param_group['lr'] * 0.1
     return optimizer
 
-
-best_acc1 = 0  # best test accuracy
-is_best = 0
-
-
-def main_verbose(args):
-    global best_acc1
-    global is_best
-    # ## Set the seed
-    seed_all(args.seed)
-    start_epoch = args.start_epoch
-    # ## Make path a dir to save models
-    if not os.path.isdir(args.checkpoint + '/' + args.dataset):
-        mkdir_p(args.checkpoint + '/' + args.dataset)
-    if not os.path.isdir(args.checkpoint + '/' + args.result):
-        mkdir_p(args.checkpoint + '/' + args.result)
-    # ## Preparing data and model
-    train_loader, test_loader = datapool(args.dataset, args.batch_size, args.num_workers)
-    net = modelpool(args.model, args.dataset)
-    net = replace_maxpool2d_by_avgpool2d(net)
-    net = replace_activation_by_slip(net, args.l, args.a, args.shift1, args.shift2, args.a_learnable)
-    net = net.to(DEVICE)
-    # ## Define loss function (criterion), optimizer, and learning rate scheduler
-    # ## criterion = torch.nn.CrossEntropyLoss()
-    criterion = torch.nn.CrossEntropyLoss().to(DEVICE)
-    if args.optimizer == 'SGD_Customed':
-        optimizer = torch.optim.SGD(
-            net.parameters(), lr=args.lr,
-            momentum=args.momentum, weight_decay=args.weight_decay)
-        """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(args.epochs/4) )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=int(args.epochs/4), eta_min=args.lr*0.88)
-    elif args.optimizer == 'SGD':
-        # ## Use SGD with MOMENTUM
-        # ## para1-3 are the ones used in QCFS
-        para1, para2, para3 = regular_set(net)
-        optimizer = torch.optim.SGD(
-            [{'params': para1, 'weight_decay': args.weight_decay},
-             {'params': para2, 'weight_decay': args.weight_decay},
-             {'params': para3, 'weight_decay': args.weight_decay}],
-            lr=args.lr,
-            momentum=args.momentum
+def replace_activation_by_slip(net, t, a, shift1, shift2, a_learnable):
+    for name, module in net._modules.items():
+        key = module.__class__.__name__.lower()
+        if hasattr(module, "_modules"):
+            net._modules[name] = replace_activation_by_slip(
+                module, t, a, shift1, shift2, a_learnable
             )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs )
-    elif args.optimizer == 'Adam':
-        optimizer = torch.optim.Adam(
-            net.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.999))
-        """Sets the learning rate to the initial LR decayed by 10 every 30 epochs"""
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
-    # ## Use SGD without MOMENTUM
-    para1, para2, para3 = regular_set(net)
-    optimizer1 = torch.optim.SGD(
-        [
-            {'params': para1, 'weight_decay': args.weight_decay},
-            {'params': para2, 'weight_decay': args.weight_decay},
-            {'params': para3, 'weight_decay': args.weight_decay}
-            ],
-        lr=args.lr)
-    # optimizer1 = torch.optim.SGD(model.parameters(), lr=args.lr)  # If use all parameter, worse performance.
-    scheduler1 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer1, T_max=args.epochs )
-    title = f'{args.dataset}_{args.name}_train_ANN'
-    # ## Resume, optionally resume from a checkpoint
-    if args.resume:
-        print('==> Resuming from checkpoint..')
-        assert os.path.isfile(
-            args.checkpoint + '/' + args.dataset + '/' + args.resume), 'Error: no checkpoint directory found!'
-        checkpoint = torch.load(args.checkpoint + '/' + args.dataset + '/' + args.resume)
-        start_epoch = checkpoint['epoch']
-        best_acc1 = checkpoint['best_acc1']
-        net.load_state_dict(checkpoint['state_dict'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        scheduler.load_state_dict(checkpoint['scheduler'])
-        try:
-            logger = Logger(os.path.join(
-                args.checkpoint, args.dataset, args.name + '.txt'), title=title, resume=True)
-        except:
-            print('Cannot open the designated log file, have created a new one.')
-            logger = Logger(os.path.join(args.checkpoint, args.dataset, args.name + '.txt'), title=title)
-            logger.set_names(
-                ['Epoch', 'Learning Rate', 'Train Loss', 'Train Acc1.', 'Train Acc5.', 'Test Loss', 'Test Acc1.', 'Test Acc5.'])
-            logger.set_formats(
-                ['{0:d}', '{0:.7f}', '{0:.4f}', '{0:.3f}', '{0:.3f}', '{0:.4f}', '{0:.3f}', '{0:.3f}'])
-
-    # ## Train the model
-    if args.action == 'train':
-        print(f'Training model ==> {args.dataset} {args.name}')
-        print('============= Try to train the model with SGD with MOMENTUM ============= ')
-        mom_disflag = 0
-        # ## First try, SGD with MOMENTUM
-        logger = Logger(os.path.join(args.checkpoint, args.dataset, args.name + '.txt'), title=title)
-        logger.set_names(['Epoch', 'Learning Rate', 'Train Loss', 'Train Acc1.', 'Train Acc5.', 'Test Loss', 'Test Acc1.', 'Test Acc5.'])
-        logger.set_formats(['{0:d}', '{0:.7f}', '{0:.4f}', '{0:.3f}', '{0:.3f}', '{0:.4f}', '{0:.3f}', '{0:.3f}'])
-        for epoch in range(start_epoch, args.epochs):
-            state['lr'] = optimizer.state_dict()['param_groups'][0]['lr']
-            print('Epoch: [%d | %d] LR: %f' % (epoch, args.epochs, state['lr']))
-            # ## adjust_learning_rate(optimizer, epoch)
-            # ## Train for one epoch
-            loss_train, acc1_train, acc5_train = train(train_loader, net, criterion, optimizer, epoch, args)
-            if torch.isnan(torch.tensor(loss_train)):
-                mom_disflag = 1
-                print('================ Failed using SGD with momentum, and try SGD without momentum ================')
-                break
-            # ## Evaluate on validation set
-            loss_test, acc1_test, acc5_test = test(test_loader, net, criterion, args)
-            # ## Append logger file
-            logger.append([epoch, state['lr'], loss_train, acc1_train, acc5_train, loss_test, acc1_test, acc5_test])
-            # ## Remember best acc@1 and save checkpoint
-            is_best = acc1_test > best_acc1
-            best_acc1 = max(acc1_test, best_acc1)
-            save_checkpoint(
-                {
-                    'epoch': epoch + 1,
-                    'model_arch': args.model,
-                    'state_dict': net.state_dict(),
-                    'best_acc1': best_acc1,
-                    'optimizer': optimizer.state_dict(),
-                    'scheduler': scheduler.state_dict()
-                    },
-                is_best,
-                checkpoint=args.checkpoint+'/'+args.dataset,
-                filename=args.name)
-            # ## Updating the learning rate for the next epoch
-            scheduler.step()
-        # ## Finish write information
-        logger.close()
-        # ## Another try, SGD without momentum
-        if mom_disflag == 1:
-            logger = Logger(os.path.join(args.checkpoint, args.dataset, args.name + '.txt'), title=title)
-            logger.set_names(['Epoch', 'Learning Rate', 'Train Loss', 'Train Acc1.', 'Train Acc5.', 'Test Loss', 'Test Acc1.', 'Test Acc5.'])
-            logger.set_formats(['{0:d}', '{0:.7f}', '{0:.4f}', '{0:.3f}', '{0:.3f}', '{0:.4f}', '{0:.3f}', '{0:.3f}'])
-            for epoch in range(start_epoch, args.epochs):
-                state['lr'] = optimizer1.state_dict()['param_groups'][0]['lr']
-                print('Epoch: [%d | %d] LR: %f' % (epoch, args.epochs, state['lr']))
-                # ## adjust_learning_rate(optimizer, epoch)
-                # ## Train for one epoch
-                loss_train, acc1_train, acc5_train = train(train_loader, net, criterion, optimizer1, epoch, args)
-                if torch.isnan(torch.tensor(loss_train)):
-                    print('================ Failed using SGD without momentum, and stop ================')
-                    break
-                # ## Updating the learning rate for the next epoch
-                scheduler1.step()
-                # ## Valuate on validation set
-                loss_test, acc1_test, acc5_test = test(test_loader, net, criterion, args)
-                # ## Append logger file
-                logger.append([epoch, state['lr'], loss_train, acc1_train, acc5_train, loss_test, acc1_test, acc5_test])
-
-                # ## Remember best acc@1 and save checkpoint
-                is_best = acc1_test > best_acc1
-                best_acc1 = max(acc1_test, best_acc1)
-                save_checkpoint(
-                    {
-                        'epoch': epoch + 1,
-                        'model_arch': args.model,
-                        'state_dict': net.state_dict(),
-                        'best_acc1': best_acc1,
-                        'optimizer': optimizer.state_dict(),
-                        'scheduler': scheduler.state_dict()
-                        },
-                    is_best,
-                    checkpoint=args.checkpoint+'/'+args.dataset,
-                    filename=args.name)
-                # ## Updating the learning rate for the next epoch
-                # ## scheduler.step()
-            # ## Finish write information
-            logger.close()
-        # fname = os.path.join(args.checkpoint, args.dataset, args.name + '_logger.pkl')
-        # with open(fname, 'wb') as f:
-        #     pickle.dump(logger, f)
-        # # TypeError: cannot pickle '_io.TextIOWrapper' object
-        if best_acc1 == 0:
-            print('================ Failed training with current optimizer ================')
-            return
-        # ## Print the best accuracy
-        print(f'Best acc:   {best_acc1} ')
-        # ## Plot the loss and accuracy
-        fig = logger.plot(['Train Loss', 'Test Loss'])
-        fig.savefig(os.path.join(args.checkpoint, args.result, args.name + '_loss.pdf'))
-        fig = logger.plot(['Train Acc1.', 'Test Acc1.'])
-        fig.savefig(os.path.join(args.checkpoint, args.result, args.name + '_acc1.pdf'))
-        fig = logger.plot(['Train Acc5.', 'Test Acc5.'])
-        fig.savefig(os.path.join(args.checkpoint, args.result, args.name + '_acc5.pdf'))
-        fig = logger.plot(['Learning Rate'])
-        fig.savefig(os.path.join(args.checkpoint, args.result, args.name + '_LearningRate.pdf'))
-        # # ### fig = logger.plot()  # this cause problems, as the scales are different
-        # savefig(fig, os.path.join(args.checkpoint, args.dataset, args.name + '.pdf'))
-        # ## Save it to a file
-        fname = os.path.join(args.checkpoint, args.result, args.name + '_loss_acc.pkl')
-        with open(fname, 'wb') as f:
-            pickle.dump(logger.numbers, f)
-        # ## and later you can load it
-        # with open('test_logger.pkl', 'rb') as f:
-        #     dt = pickle.load(f)
-        print('Training Finished, now begin to evaluate the model ')
-        print(f'Reloading model ==> {args.dataset} {args.name}')
-        # ## MUST load the best model before test/eval
-        checkpoint = torch.load(os.path.join(args.checkpoint, args.dataset, args.name + '_best.pth'))
-        net.load_state_dict(checkpoint['state_dict'])
-        net = net.to(DEVICE)
-        # ## ANN evalue
-        ann_acc, _ = eval_ann(test_loader, net, criterion, DEVICE)
-        print('Accuracy of testing ANN: {:.4f}'.format(ann_acc))
-        # ## save for every a_learnable, L, a, T, and its snn accuracy
-        test_ann_acc = {
-            "learn": args.a_learnable,
-            "shift1": args.shift1, "shift2": args.shift2,
-            "L": args.l,
-            "a": args.a, "T": args.t,
-            "ann acc": ann_acc}
-        with open(os.path.join(args.checkpoint, args.result, 'test_ann_' + args.name + '.pkl'), 'wb') as f:
-            pickle.dump(test_ann_acc, f)
-        # ## SNN test
-        net = replace_activation_by_neuron(net, shift=args.shift2)
-        net = net.to(DEVICE)
-        snn_acc = eval_snn(test_loader, net, DEVICE, args.t)
-        print('Accuracy of testing SNN: ', snn_acc)
-        # ## save for every a_learnable, L, a, T, and its snn accuracy
-        eval_snn_acc = {
-            "learn": args.a_learnable,
-            "shift1": args.shift1, "shift2": args.shift2,
-            "L": args.l, "a": args.a, "T": args.t,
-            "snn acc": snn_acc}
-        with open(os.path.join(args.checkpoint, args.result, 'eval_snn_' + args.name + '.pkl'), 'wb') as f:
-            pickle.dump(eval_snn_acc, f)
-    elif args.action == 'test' or args.action == 'evaluate':
-        print(f'Reloading model ==> {args.dataset} {args.name}')
-        # ## MUST load the best model before test/eval
-        checkpoint = torch.load(os.path.join(args.checkpoint, args.dataset, args.name + '_best.pth'))
-        net.load_state_dict(checkpoint['state_dict'])
-        net = net.to(DEVICE)
-        if args.mode == 'ann':
-            # ## ANN evalue
-            ann_acc, _ = eval_ann(test_loader, net, criterion, DEVICE)
-            print('Accuracy of testing ANN: {:.4f}'.format(ann_acc))
-            # ## save for every a_learnable, L, a, T, and its snn accuracy
-            test_ann_acc = {
-                "learn": args.a_learnable,
-                "shift1": args.shift1, "shift2": args.shift2,
-                "L": args.l,
-                "a": args.a, "T": args.t,
-                "ann acc": ann_acc}
-            with open(os.path.join(args.checkpoint, args.result, 'test_ann_' + args.name + '.pkl'), 'wb') as f:
-                pickle.dump(test_ann_acc, f)
-        elif args.mode == 'snn':
-            # ## SNN test
-            net = replace_activation_by_neuron(net, shift=args.shift2)
-            net = net.to(DEVICE)
-            snn_acc = eval_snn(test_loader, net, DEVICE, args.t)
-            print('Accuracy of testing SNN: ', snn_acc)
-            # ## save for every a_learnable, L, a, T, and its snn accuracy
-            eval_snn_acc = {
-                "learn": args.a_learnable,
-                "shift1": args.shift1, "shift2": args.shift2,
-                "L": args.l, "a": args.a, "T": args.t,
-                "snn acc": snn_acc}
-            with open(os.path.join(args.checkpoint, args.result, 'eval_snn_' + args.name + '.pkl'), 'wb') as f:
-                pickle.dump(eval_snn_acc, f)
+        if not isActivation(key):
+            continue
+        tcl = TCL()
+        up = 8.0
+        if hasattr(module, "up"):
+            up = module.up.item()
+        slip = MySlipReLU(up, t, a, shift1, shift2, a_learnable)
+        if t == 0:
+            net._modules[name] = tcl
         else:
-            AssertionError('Unrecognized mode')
-    else:
-        AssertionError('Unrecognized action')
+            net._modules[name] = slip
+    return net
 
-
-
-best_acc1 = 0  # best test accuracy
+best_acc1 = 0
 is_best = 0
-
 
 def main(args):
     global best_acc1
@@ -420,7 +264,12 @@ def main(args):
     l_tr, l_te = datapool(args.dataset, args.batch_size, args.num_workers)
     net = modelpool(args.model, args.dataset)
     net = replace_maxpool2d_by_avgpool2d(net)
-    net = replace_activation_by_slip(net, args.l, args.a, args.shift1, args.shift2, args.a_learnable)
+    net = replace_activation_by_slip(
+        net,
+        args.l, args.a,
+        args.shift1, args.shift2,
+        args.a_learnable
+    )
     net = net.to(DEVICE)
 
     crit = CrossEntropyLoss().to(DEVICE)
@@ -446,9 +295,7 @@ def main(args):
         fname = os.path.join(args.checkpoint, args.result, args.name + '_loss_acc.pkl')
         with open(fname, 'wb') as f:
             pickle.dump(logger.numbers, f)
-        # ## and later you can load it
-        # with open('test_logger.pkl', 'rb') as f:
-        #     dt = pickle.load(f)
+
         # ## Step 2: test ann
         print('Training Finished, now begin to evaluate the model ')
         print(f'Reloading model ==> {args.dataset} {args.name}')

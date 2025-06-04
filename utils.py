@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 # from torch.nn.parameter import Parameter
 # from torch.nn import functional as F
-from modules import TCL, MySlipReLU, ScaledNeuron, StraightThrough
+from modules import TCL, ScaledNeuron, StraightThrough
 
 
 def isActivation(name):
@@ -25,24 +25,6 @@ def replace_activation_by_module(model, m):
 
 
 
-def replace_activation_by_slip(model, t, a, shift1, shift2, a_learnable):
-    for name, module in model._modules.items():
-        if hasattr(module, "_modules"):
-            model._modules[name] = replace_activation_by_slip(module, t, a, shift1, shift2, a_learnable)
-
-        if isActivation(module.__class__.__name__.lower()):
-            if hasattr(module, "up"):
-                print(module.up.item())
-                if t == 0:
-                    model._modules[name] = TCL()
-                else:
-                    model._modules[name] = MySlipReLU(module.up.item(), t, a, shift1, shift2, a_learnable)
-            else:
-                if t == 0:
-                    model._modules[name] = TCL()
-                else:
-                    model._modules[name] = MySlipReLU(8., t, a, shift1, shift2, a_learnable)
-    return model
 
 
 def replace_activation_by_neuron(model, shift):
