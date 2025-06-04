@@ -29,7 +29,7 @@ def replace_activation_by_slip(model, t, a, shift1, shift2, a_learnable):
     for name, module in model._modules.items():
         if hasattr(module, "_modules"):
             model._modules[name] = replace_activation_by_slip(module, t, a, shift1, shift2, a_learnable)
-        
+
         if isActivation(module.__class__.__name__.lower()):
             if hasattr(module, "up"):
                 print(module.up.item())
@@ -138,8 +138,9 @@ def search_fold_and_remove_bn(model):
     return prev
 
 
-def regular_set(model, paras=([],[],[])):
-    for n, module in model._modules.items():
+# Not necessary since we use the same weight_decay for all.
+def regular_set(net, paras=([],[],[])):
+    for n, module in net._modules.items():
         # print(n, module)
         if isActivation(module.__class__.__name__.lower()) and hasattr(module, "up"):
             for name, para in module.named_parameters():
@@ -148,14 +149,8 @@ def regular_set(model, paras=([],[],[])):
             for name, para in module.named_parameters():
                 paras[2].append(para)
         elif len(list(module.children())) > 0:
-            # print("len_module")
-            # print(n, module)
             paras = regular_set(module, paras)
         elif module.parameters() is not None:
-            # print("par_module")
-            # print(n, module)
             for name, para in module.named_parameters():
                 paras[1].append(para)
     return paras
-
-

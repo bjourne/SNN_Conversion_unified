@@ -1,18 +1,18 @@
 import time
 import numpy as np
-# from torch import nn
 import torch
 from tqdm import tqdm
 from utils import reset_net, regular_set
-# from modules import LabelSmoothing
-# import torch.distributed as dist
+
 import random
 import os
-# from misc import AverageMeter, ProgressMeter
+
 from misc import accuracy, save_checkpoint, AverageMeter, ProgressMeter
 from logger import Logger
+from torch.optim import SGD
+from torch.optim.lr_scheduler import CosineAnnealingLR
 
-
+DEVICE = "cpu"
 
 def seed_all(seed=42):
     random.seed(seed)
@@ -24,7 +24,7 @@ def seed_all(seed=42):
     torch.backends.cudnn.deterministic = True
 
 
-def eval_ann(test_dataloader, model, criterion, device):
+def eval_ann(test_dataloader, model, crit, device):
     model.eval()
     # model.to(device)
     tot = torch.tensor(0.).to(device)  # accuracy
@@ -35,7 +35,7 @@ def eval_ann(test_dataloader, model, criterion, device):
             img = img.to(device)
             label = label.to(device)
             out = model(img)
-            loss = criterion(out, label)
+            loss = crit(out, label)
             epoch_loss += loss.item()
             length += len(label)
             tot += (label==out.max(1)[1]).sum().data
@@ -46,8 +46,6 @@ def eval_snn(test_dataloader, model, device, sim_len=8):
     tot = torch.zeros(sim_len).to(device)
     length = 0
     model.eval()
-    # model.to(device)
-    # ## Valuate
     with torch.no_grad():
         for idx, (img, label) in enumerate(tqdm(test_dataloader)):
             spikes = 0
@@ -62,7 +60,7 @@ def eval_snn(test_dataloader, model, device, sim_len=8):
     return tot/length
 
 
-def train(train_loader, model, criterion, optimizer, epoch, args):
+def train(train_loader, net, crit, optimizer, epoch, args):
     batch_time = AverageMeter(name='Time', fmt=':6.3f')
     losses = AverageMeter(name='Loss', fmt=':6.3f')  # fmt=':.4e' with 1.1337e+00
     top1 = AverageMeter(name='Acc@1', fmt=':6.2f')
@@ -74,30 +72,27 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     # ## Use to calculate the loss
     running_loss = 0
     n_correct = 0
-    num_total = 0  # len(trainloader.dataset) # which is num_total
-    # ## Switch to train mode
-    model.train()
+    num_total = 0
+
+    net.train()
     end = time.time()
     for i, (images, target) in enumerate(train_loader):
-        # ## Move data to the same device as model
-        images = images.to(args.device, non_blocking=True)
-        target = target.to(args.device, non_blocking=True)
-        # if i > 50: break  # ## This is just used for debugging.
-        # ## Compute output
-        output = model(images)
-        # ## Measure accuracy and record loss
-        loss = criterion(output, target)
+        images = images.to(DEVICE, non_blocking=True)
+        target = target.to(DEVICE, non_blocking=True)
+
+        output = net(images)
+
+        loss = crit(output, target)
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
         losses.update(loss.item(), images.size(0))   # losses.show()
         top1.update(acc1.item(), images.size(0))
         top5.update(acc5.item(), images.size(0))
-        # top1.update(acc1[0], images.size(0))  # this acc1[0] will be tensor
-        # top5.update(acc5[0], images.size(0))
+
         """ Calculate loss and accuracy manually """
         # ## calculate the loss and accuracy
         running_loss += loss.item()
         _, predicted = output.max(dim=1)
-        # batch_correct = np.sum((targets == predicted).detach().cpu().numpy())
+
         batch_correct = predicted.eq(target).sum().item()
         n_correct += batch_correct
         num_total += target.size(0)
@@ -112,8 +107,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
         end = time.time()
         if (i % args.print_freq == 0) or (i == len(train_loader)-1):
             progress.display(i + 1)
-    # ## Calculate the mean loss and correct ratio
-    # avg_loss = running_loss / len(train_loader)
+
     avg_loss = running_loss / (i+1)
     accu = n_correct / num_total
     # ## Print train/test loss/accuracy
@@ -126,7 +120,7 @@ def train(train_loader, model, criterion, optimizer, epoch, args):
     return (losses.avg, top1.avg, top5.avg)
 
 
-def test(test_loader, model, criterion, args):
+def test(test_loader, model, crit, args):
     batch_time = AverageMeter(name='Time', fmt=':6.3f')
     losses = AverageMeter(name='Loss', fmt=':6.3f')
     top1 = AverageMeter(name='Acc@1', fmt=':6.2f')
@@ -150,15 +144,12 @@ def test(test_loader, model, criterion, args):
             # ## Compute output
             output = model(images)
             # ## Measure accuracy and record loss
-            loss = criterion(output, target)
+            loss = crit(output, target)
             acc1, acc5 = accuracy(output, target, topk=(1, 5))
             losses.update(loss.item(), images.size(0))
             top1.update(acc1.item(), images.size(0))
             top5.update(acc5.item(), images.size(0))
-            # top1.update(acc1[0], images.size(0))  # this acc1[0] will be tensor
-            # top5.update(acc5[0], images.size(0))
-            """ Calculate loss and accuracy manually """
-            # ## calculate the loss and accuracy
+
             running_loss += loss.item()
             _, predicted = output.max(dim=1)
             # batch_correct = np.sum((targets == predicted).detach().cpu().numpy())
@@ -184,8 +175,17 @@ def test(test_loader, model, criterion, args):
 
 
 
-def train_ann_flag(train_loader, test_loader, model, criterion, optimizer, scheduler, args, state):
-    model.to(args.device)
+def train_ann_flag(
+    train_loader,
+    test_loader,
+    model,
+    crit,
+    optimizer,
+    scheduler,
+    args,
+    state
+):
+    model.to(DEVICE)
     # ## model.train()
     logger = Logger(os.path.join(args.checkpoint, args.dataset, args.name + '.txt'), title='train_ann')
     logger.set_names(['Epoch', 'Learning Rate', 'Train Loss', 'Train Acc1.', 'Train Acc5.', 'Test Loss', 'Test Acc1.', 'Test Acc5.'])
@@ -196,14 +196,13 @@ def train_ann_flag(train_loader, test_loader, model, criterion, optimizer, sched
     for epoch in range(args.epochs):
         state['lr'] = optimizer.state_dict()['param_groups'][0]['lr']
         print('Epoch: [%d | %d] LR: %f' % (epoch, args.epochs, state['lr']))
-        # ## adjust_learning_rate(optimizer, epoch)
-        # ## Train Model for one epoch
-        loss_train, acc1_train, acc5_train = train(train_loader, model, criterion, optimizer, epoch, args)
+
+        loss_train, acc1_train, acc5_train = train(train_loader, model, crit, optimizer, epoch, args)
         if torch.isnan(torch.tensor(loss_train)):
             mom_disflag = 1
             break
-        # ## Evaluate on validation set
-        loss_test, acc1_test, acc5_test = test(test_loader, model, criterion, args)
+
+        loss_test, acc1_test, acc5_test = test(test_loader, model, crit, args)
         print('Epoch {} --> Val_loss: {}, Acc: {}'.format(epoch, loss_test, acc1_test), flush=True)
         # ## Append logger file
         logger.append([epoch, state['lr'], loss_train, acc1_train, acc5_train, loss_test, acc1_test, acc5_test])
@@ -229,59 +228,65 @@ def train_ann_flag(train_loader, test_loader, model, criterion, optimizer, sched
     return mom_disflag, best_acc1, model, logger
 
 
-def train_ann_(train_loader, test_loader, model, criterion, args, state):
+def train_ann_(train_loader, test_loader, model, crit, args, state):
     model.to(args.device)
     # ## SGD with momentum
-    # ## If use all parameter, worse performance. 
-    optimizer = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    # ## If use all parameter, worse performance.
+    optimizer = SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     # ## SGD without momentum
-    optimizer1 = torch.optim.SGD(model.parameters(), lr=args.lr)
-    scheduler1 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer1, T_max=args.epochs )
+    optimizer1 = SGD(model.parameters(), lr=args.lr)
+    scheduler1 = CosineAnnealingLR(optimizer1, T_max=args.epochs )
     print('============= Try to train the model with SGD with MOMENTUM ============= ')
     mom_disflag, best_acc1, model, logger = train_ann_flag(
-        train_loader, test_loader, model, criterion, optimizer, scheduler, args, state)
+        train_loader, test_loader, model, crit, optimizer, scheduler, args, state)
     if mom_disflag == 1:
         print('================ Failed using SGD with momentum, and try SGD without momentum ================')
         mom_disflag, best_acc1, model, logger = train_ann_flag(
-            train_loader, test_loader, model, criterion, optimizer1, scheduler1, args, state)
+            train_loader, test_loader, model, crit, optimizer1, scheduler1, args, state)
         print('================ Failed using SGD without momentum, and stop ================')
     return best_acc1, model, logger
 
 
 
-def train_ann(train_loader, test_loader, model, criterion, args, state):
+def train_ann(
+    train_loader,
+    test_loader,
+    net,
+    crit,
+    args,
+    state
+):
     """ Imported from QCFS, Only part of the model parameters are in the optimizer """
-    model.to(args.device)
+    net.to(DEVICE)
     # ## SGD with momentum
-    para1, para2, para3 = regular_set(model)
-    optimizer = torch.optim.SGD(
+    para1, para2, para3 = regular_set(net)
+    optimizer = SGD(
         [
-            {'params': para1, 'weight_decay': args.weight_decay}, 
-            {'params': para2, 'weight_decay': args.weight_decay}, 
+            {'params': para1, 'weight_decay': args.weight_decay},
+            {'params': para2, 'weight_decay': args.weight_decay},
             {'params': para3, 'weight_decay': args.weight_decay}
             ],
-        lr=args.lr, 
+        lr=args.lr,
         momentum=args.momentum
-        )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+    )
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs)
     # ## SGD without momentum
-    optimizer1 = torch.optim.SGD(
+    opt1 = torch.optim.SGD(
         [
-            {'params': para1, 'weight_decay': args.weight_decay}, 
-            {'params': para2, 'weight_decay': args.weight_decay}, 
+            {'params': para1, 'weight_decay': args.weight_decay},
+            {'params': para2, 'weight_decay': args.weight_decay},
             {'params': para3, 'weight_decay': args.weight_decay}
             ],
         lr=args.lr)
-    # ## optimizer1 = torch.optim.SGD(model.parameters(), lr=args.lr)  # If use all parameter, worse performance. 
-    scheduler1 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer1, T_max=args.epochs )
-    print('============= Try to train the model with SGD with MOMENTUM ============= ')
-    mom_disflag, best_acc1, model, logger = train_ann_flag(
-        train_loader, test_loader, model, criterion, optimizer, scheduler, args, state)
-    # ## The first try may change a bit of the model. 
+
+    scheduler1 = CosineAnnealingLR(opt1, T_max=args.epochs )
+    mom_disflag, best_acc1, net, logger = train_ann_flag(
+        train_loader, test_loader, net, crit, optimizer, scheduler, args, state)
+    # ## The first try may change a bit of the model.
     if mom_disflag == 1:
         print('================ Failed using SGD with momentum, and try SGD without momentum ================')
-        mom_disflag, best_acc1, model, logger = train_ann_flag(
-            train_loader, test_loader, model, criterion, optimizer1, scheduler1, args, state)
+        mom_disflag, best_acc1, net, logger = train_ann_flag(
+            train_loader, test_loader, net, crit, opt1, scheduler1, args, state)
         print('================ Failed using SGD without momentum, and stop ================')
-    return best_acc1, model, logger
+    return best_acc1, net, logger
